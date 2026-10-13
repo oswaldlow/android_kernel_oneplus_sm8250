@@ -639,6 +639,14 @@ static char *kstruprdup(const char *str, gfp_t gfp)
 	return ret;
 }
 
+#ifdef OPLUS_CUSTOM_OP_DEF
+void __weak oplus_op_get_quick_charge(int *type, int *power_w)
+{
+	*type = 0;
+	*power_w = 0;
+}
+#endif
+
 int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct power_supply *psy = dev_get_drvdata(dev);
@@ -654,6 +662,18 @@ int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 	ret = add_uevent_var(env, "POWER_SUPPLY_NAME=%s", psy->desc->name);
 	if (ret)
 		return ret;
+#ifdef OPLUS_CUSTOM_OP_DEF
+	if (psy->desc->type == POWER_SUPPLY_TYPE_BATTERY) {
+		int qc_type, power_w;
+
+		oplus_op_get_quick_charge(&qc_type, &power_w);
+		ret = add_uevent_var(env, "POWER_SUPPLY_QUICK_CHARGE_TYPE=%d", qc_type);
+		if (!ret)
+			ret = add_uevent_var(env, "POWER_SUPPLY_OP8_POWER_MAX=%d", power_w);
+		if (ret)
+			return ret;
+	}
+#endif
 
 	prop_buf = (char *)get_zeroed_page(GFP_KERNEL);
 	if (!prop_buf)

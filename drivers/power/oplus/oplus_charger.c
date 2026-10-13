@@ -1073,6 +1073,10 @@ int oplus_battery_get_property(struct power_supply *psy, enum power_supply_prope
 			} else {
 				val->intval = chip->prop_status;
 			}
+#ifdef OPLUS_CUSTOM_OP_DEF
+			if (val->intval == POWER_SUPPLY_STATUS_DISCHARGING && chip->charger_exist)
+				val->intval = POWER_SUPPLY_STATUS_CHARGING; /* op8port: see oplus_op_get_quick_charge */
+#endif
 			if (oplus_wpc_get_online_status() || oplus_chg_is_wls_present())
 				pre_batt_status = val->intval;
 		}
@@ -12063,11 +12067,36 @@ static void oplus_chg_pd_config(struct oplus_chg_chip *chip)
 			oplus_chg_set_input_current_limit(chip);
 			oplus_chg_enable_burst_mode(true);
 			oplus_chg_get_charger_voltage();
+#ifdef OPLUS_CUSTOM_OP_DEF
+			/* op8port: publish POWER_SUPPLY_QUICK_CHARGE_TYPE now (HyperOS charge animation) */
+			if (chip->batt_psy)
+				power_supply_changed(chip->batt_psy);
+#endif
 		}
 	} else {
 		chg_err("oplus_chg_pd_config:get pd_type failed\n");
 	}
 }
+
+#ifdef OPLUS_CUSTOM_OP_DEF
+/* op8port: HyperOS charge animation. Warp = 30W, USB PD (5V/3A) = 15W, anything else normal. */
+void oplus_op_get_quick_charge(int *type, int *power_w)
+{
+	struct oplus_chg_chip *chip = g_charger_chip;
+
+	*type = 0;
+	*power_w = 0;
+	if (!chip || !chip->charger_exist)
+		return;
+	if (oplus_vooc_get_fastchg_started()) {
+		*type = 4;
+		*power_w = 30;
+	} else if (chip->pd_chging) {
+		*type = 4;
+		*power_w = 15;
+	}
+}
+#endif
 
 static void oplus_chg_pdqc_to_normal(struct oplus_chg_chip *chip)
 {

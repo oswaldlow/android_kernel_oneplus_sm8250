@@ -2402,6 +2402,12 @@ void oplus_vooc_init(struct oplus_vooc_chip *chip)
 		}
 #endif
 		init_vooc_proc(chip);
+#ifdef OPLUS_CUSTOM_OP_DEF
+		/* op8port: OOS bspFwUpdate wrote 1 to /proc/fastchg_fw_update at boot; it lived on the OOS
+		 * system partition. Check/recover the VOOC MCU firmware ourselves once userspace is up. */
+		chip->fw_update_flag = 1;
+		schedule_delayed_work(&chip->fw_update_work, msecs_to_jiffies(30000));
+#endif
 		return;
 
 	manu_fwpath_alloc_err:
