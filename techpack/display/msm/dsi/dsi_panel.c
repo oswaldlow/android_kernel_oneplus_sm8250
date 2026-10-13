@@ -5526,6 +5526,30 @@ exit:
 	return rc;
 }
 
+#ifdef OPLUS_CUSTOM_OP_DEF
+/* op8port: re-apply the backlight shortly after leaving AOD (see dsi_panel_set_nolp) */
+static void op8_nolp_bl_work_fn(struct work_struct *work)
+{
+	struct backlight_device *bd;
+
+	if (get_oplus_display_power_status() != OPLUS_DISPLAY_POWER_ON) {
+		pr_info("op8port: nolp backlight re-apply skipped, power status %d\n",
+			get_oplus_display_power_status());
+		return;
+	}
+	/* the SDE connector's backlight device (BACKLIGHT_RAW, "panel0-backlight"); no reference is taken */
+	bd = backlight_device_get_by_type(BACKLIGHT_RAW);
+	if (!bd || strcmp(dev_name(&bd->dev), "panel0-backlight")) {
+		pr_info("op8port: nolp backlight re-apply: no panel0-backlight\n");
+		return;
+	}
+	pr_info("op8port: nolp backlight re-apply %d\n", bd->props.brightness);
+	if (bd->props.brightness)
+		backlight_update_status(bd);
+}
+static DECLARE_DELAYED_WORK(op8_nolp_bl_work, op8_nolp_bl_work_fn);
+#endif
+
 int dsi_panel_set_nolp(struct dsi_panel *panel)
 {
 	int rc = 0;
@@ -5585,6 +5609,10 @@ int dsi_panel_set_nolp(struct dsi_panel *panel)
 
 #ifdef OPLUS_BUG_STABILITY
 	set_oplus_display_power_status(OPLUS_DISPLAY_POWER_ON);
+#endif
+#ifdef OPLUS_CUSTOM_OP_DEF
+	/* (not gated on dsi_panel_is_type_oled(): this panel's dt type is "dsi_cmd_mode", not OLED) */
+	schedule_delayed_work(&op8_nolp_bl_work, msecs_to_jiffies(150));
 #endif
 exit:
 	mutex_unlock(&panel->panel_lock);
