@@ -4800,6 +4800,13 @@ extern int oplus_dimlayer_bl;
 extern ktime_t oplus_backlight_time;
 extern u32 oplus_backlight_delta;
 
+
+/* oneplus8 port: in-display fingerprint sensor centre (panel pixels, LineageOS instantnoodle) */
+#define OP8_FOD_CX 546
+#define OP8_FOD_CY 1909
+#define OP8_FOD_TOL 60
+#define OP8_FOD_MIN_SIZE 300
+#define OP8_FOD_MAX_SIZE 650
 static int sde_crtc_onscreenfinger_atomic_check(struct sde_crtc_state *cstate,
 						struct plane_state *pstates,
 						int cnt)
@@ -4908,6 +4915,67 @@ static int sde_crtc_onscreenfinger_atomic_check(struct sde_crtc_state *cstate,
 
 		SDE_DEBUG("debug for get cstate->fingerprint_mode = %d\n",
 			  cstate->fingerprint_mode);
+
+		/*
+		 * oneplus8 port: MIUI SurfaceFlinger never tags a layer with the oplus fingerprint zpos.
+		 * While the finger is pressed, treat SystemUI's FOD highlight as the "pressed" layer: planes
+		 * are grouped per blend stage (the HWC source-splits its windows into left/right pipes), and
+		 * the highest stage whose union rect is centred on the sensor and 300..650 px wide/high wins
+		 * (the 562 px highlight; the 720 px animation window, composed on top by the HWC and drawing
+		 * the enroll ring, is excluded). That stage is raised above every other plane, so the regular
+		 * path below puts the HBM-compensating dim layer right under it: only the highlight is at full
+		 * HBM and nothing is drawn over it, like a panel-drawn local HBM circle. Without such a plane,
+		 * fall back to plain HBM + UI_READY. When not pressed, the dim layer goes on top as usual.
+		 */
+		if (dimlayer_hbm && fp_index < 0 && fppressed_index < 0 && fp_mode) {
+			int best_stage = -1, max_stage = 0;
+
+			for (i = 0; i < cnt; i++) {
+				const struct drm_plane_state *ps = pstates[i].drm_pstate;
+				int x0, y0, x1, y1, j;
+
+				if (!ps || !ps->crtc || !ps->crtc_w || !ps->crtc_h)
+					continue;
+				if (pstates[i].stage > max_stage)
+					max_stage = pstates[i].stage;
+				x0 = ps->crtc_x;
+				y0 = ps->crtc_y;
+				x1 = ps->crtc_x + (int)ps->crtc_w;
+				y1 = ps->crtc_y + (int)ps->crtc_h;
+				for (j = 0; j < cnt; j++) {
+					const struct drm_plane_state *qs = pstates[j].drm_pstate;
+
+					if (j == i || !qs || !qs->crtc ||
+					    pstates[j].stage != pstates[i].stage)
+						continue;
+					x0 = min(x0, qs->crtc_x);
+					y0 = min(y0, qs->crtc_y);
+					x1 = max(x1, qs->crtc_x + (int)qs->crtc_w);
+					y1 = max(y1, qs->crtc_y + (int)qs->crtc_h);
+				}
+				if (x1 - x0 < OP8_FOD_MIN_SIZE || x1 - x0 > OP8_FOD_MAX_SIZE ||
+				    y1 - y0 < OP8_FOD_MIN_SIZE || y1 - y0 > OP8_FOD_MAX_SIZE)
+					continue;
+				if (abs((x0 + x1) / 2 - OP8_FOD_CX) > OP8_FOD_TOL ||
+				    abs((y0 + y1) / 2 - OP8_FOD_CY) > OP8_FOD_TOL)
+					continue;
+				if (pstates[i].stage > best_stage) {
+					best_stage = pstates[i].stage;
+					fppressed_index = i;
+				}
+			}
+			if (fppressed_index < 0) {
+				cstate->fingerprint_pressed = cstate->fingerprint_mode;
+				return 0;
+			}
+			/* raise it on top (final stage max_stage + 2 once the dim layer is inserted) */
+			if (best_stage < max_stage &&
+			    max_stage + 2 < SDE_STAGE_MAX - SDE_STAGE_0) {
+				for (i = 0; i < cnt; i++)
+					if (pstates[i].stage == best_stage)
+						pstates[i].stage = max_stage + 1;
+			}
+		}
 
 		SDE_DEBUG(
 			"aod_index = %d, fp_index= %d, fppressed_index = %d, fp_mode=%d, bl=%d\n",
