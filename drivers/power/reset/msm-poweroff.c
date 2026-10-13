@@ -66,7 +66,7 @@ static void scm_disable_sdi(void);
  * There is no API from TZ to re-enable the registers.
  * So the SDI cannot be re-enabled when it already by-passed.
  */
-static int download_mode = 1;
+static int download_mode = 0; /* oneplus8 port: no 900E crashdump mode */
 static struct kobject dload_kobj;
 
 static int in_panic;
@@ -509,6 +509,12 @@ static void halt_spmi_pmic_arbiter(void)
 static void msm_restart_prepare(const char *cmd)
 {
 	bool need_warm_reset = false;
+
+	if (in_panic) { /* oneplus8 port: panic -> plain warm reboot to Android, no 900E crashdump */
+		set_dload_mode(0);
+		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
+		return;
+	}
 	/* Write download mode flags if we're panic'ing
 	 * Write download mode flags if restart_mode says so
 	 * Kill download mode if master-kill switch is set
@@ -734,6 +740,7 @@ static int msm_restart_probe(struct platform_device *pdev)
 
 	force_warm_reboot = of_property_read_bool(dev->of_node,
 						"qcom,force-warm-reboot");
+	force_warm_reboot = true; /* dbg: always warm reboot so ramoops survives */
 
 	return 0;
 
