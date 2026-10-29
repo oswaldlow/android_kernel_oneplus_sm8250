@@ -38,6 +38,7 @@
 #include <linux/rmap.h>
 #include <linux/delayacct.h>
 #include <linux/psi.h>
+#include <linux/op8_iorap.h>
 #include "internal.h"
 
 #define CREATE_TRACE_POINTS
@@ -2608,6 +2609,9 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 	max_off = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
 	if (unlikely(offset >= max_off))
 		return VM_FAULT_SIGBUS;
+
+	/* OnePlus 8 port: launch prefetch recording (drivers/misc/op8_iorap.c) */
+	op8_iorap_record(file, offset, 1);
 
 	/*
 	 * Do we have something in the page cache already?

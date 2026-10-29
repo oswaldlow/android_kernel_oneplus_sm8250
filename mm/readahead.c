@@ -19,6 +19,7 @@
 #include <linux/syscalls.h>
 #include <linux/file.h>
 #include <linux/mm_inline.h>
+#include <linux/op8_iorap.h>
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
 
@@ -166,6 +167,9 @@ unsigned int __do_page_cache_readahead(struct address_space *mapping,
 		goto out;
 
 	end_index = ((isize - 1) >> PAGE_SHIFT);
+	/* OnePlus 8 port: launch prefetch recording (drivers/misc/op8_iorap.c) */
+	if (offset <= end_index)
+		op8_iorap_record(filp, offset, min_t(unsigned long, nr_to_read, end_index - offset + 1));
 
 	/*
 	 * Preallocate as many pages as we will need.
