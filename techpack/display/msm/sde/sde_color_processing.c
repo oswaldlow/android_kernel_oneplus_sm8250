@@ -1439,6 +1439,45 @@ static int sde_cp_crtc_checkfeature(struct sde_cp_node *prop_node,
 	return ret;
 }
 
+/*
+ * op8port: after a panel off/on the composer sends linear IGC tables scaled to
+ * about 49% on every color mode change, which dims the whole brightness range
+ * until the composer restarts. Put such tables back to full scale.
+ */
+static void op8_igc_restore(struct sde_cp_node *prop_node,
+			    struct sde_hw_cp_cfg *hw_cfg)
+{
+	struct drm_msm_igc_lut *lut;
+	u32 max, i;
+
+	if (prop_node->feature != SDE_CP_CRTC_DSPP_IGC || !hw_cfg->payload ||
+	    hw_cfg->len != sizeof(struct drm_msm_igc_lut))
+		return;
+
+	lut = hw_cfg->payload;
+	max = lut->c0[IGC_TBL_LEN - 1] & 0xfff;
+	if (!max || max == 0xfff)
+		return;
+
+	for (i = 0; i < IGC_TBL_LEN; i++) {
+		int want = i * max / (IGC_TBL_LEN - 1);
+		int val = lut->c0[i] & 0xfff;
+
+		if (abs(val - want) > 2 || (lut->c1[i] & 0xfff) != val ||
+		    (lut->c2[i] & 0xfff) != val)
+			return;
+	}
+
+	for (i = 0; i < IGC_TBL_LEN; i++) {
+		u32 val = i * 0xfff / (IGC_TBL_LEN - 1);
+
+		lut->c0[i] = (lut->c0[i] & ~0xfffU) | val;
+		lut->c1[i] = (lut->c1[i] & ~0xfffU) | val;
+		lut->c2[i] = (lut->c2[i] & ~0xfffU) | val;
+	}
+	pr_info_once("op8port: restored IGC table scaled to %x\n", max);
+}
+
 static void sde_cp_crtc_setfeature(struct sde_cp_node *prop_node,
 				   struct sde_crtc *sde_crtc)
 {
@@ -1452,6 +1491,7 @@ static void sde_cp_crtc_setfeature(struct sde_cp_node *prop_node,
 
 	memset(&hw_cfg, 0, sizeof(hw_cfg));
 	sde_cp_get_hw_payload(prop_node, &hw_cfg, &feature_enabled);
+	op8_igc_restore(prop_node, &hw_cfg);
 
 #ifdef OPLUS_BUG_STABILITY
 	if (prop_node->feature == SDE_CP_CRTC_DSPP_PCC &&
