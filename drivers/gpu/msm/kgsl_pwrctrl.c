@@ -15,6 +15,7 @@
 
 #include "kgsl_device.h"
 #include "kgsl_pwrscale.h"
+#include <linux/op8_metis.h>
 #include "kgsl_trace.h"
 #include "kgsl_trace_power.h"
 
@@ -166,6 +167,9 @@ static void _ab_buslevel_update(struct kgsl_pwrctrl *pwr,
  * Apply thermal and max/min limits first.  Then force the level with a
  * constraint if one exists.
  */
+/* OnePlus 8 port: pwrlevel floor set by drivers/misc/metis.c during UI animations (S64), -1 = none */
+static int op8_gpu_floor = -1;
+
 static unsigned int _adjust_pwrlevel(struct kgsl_pwrctrl *pwr, int level,
 					struct kgsl_pwr_constraint *pwrc,
 					int popp)
@@ -181,6 +185,10 @@ static unsigned int _adjust_pwrlevel(struct kgsl_pwrctrl *pwr, int level,
 					pwr->thermal_pwrlevel_floor);
 	min_pwrlevel = max_t(unsigned int, min_pwrlevel,
 					pwr->thermal_pwrlevel);
+
+	/* lower level = faster; never above the thermal / max limit */
+	if (op8_gpu_floor >= 0 && op8_gpu_floor < min_pwrlevel)
+		min_pwrlevel = max_t(unsigned int, op8_gpu_floor, max_pwrlevel);
 
 	switch (pwrc->type) {
 	case KGSL_CONSTRAINT_PWRLEVEL: {
@@ -875,6 +883,19 @@ static void kgsl_pwrctrl_min_pwrlevel_set(struct kgsl_device *device,
 	/* Update the current level using the new limit */
 	kgsl_pwrctrl_pwrlevel_change(device, pwr->active_pwrlevel);
 
+	mutex_unlock(&device->mutex);
+}
+
+void op8_kgsl_gpu_floor(int level)
+{
+	struct kgsl_device *device = kgsl_get_device(KGSL_DEVICE_3D0);
+
+	if (!device)
+		return;
+	mutex_lock(&device->mutex);
+	op8_gpu_floor = level;
+	/* re-apply the limits to the current level, as min_pwrlevel_store does */
+	kgsl_pwrctrl_pwrlevel_change(device, device->pwrctrl.active_pwrlevel);
 	mutex_unlock(&device->mutex);
 }
 

@@ -5043,22 +5043,26 @@ static bool check_same_owner(struct task_struct *p)
  */
 int op8_ui_fifo_boost = 1;	/* /sys/module/metis/parameters/ui_fifo_boost */
 
-static void op8_ui_fifo_mark(struct task_struct *p)
+/* +1: marked, -1: mark removed, 0: nothing changed; metis holds a boost while marks exist (S64) */
+static int op8_ui_fifo_mark(struct task_struct *p)
 {
 	if (!p->mm || current->tgid == p->tgid || !uid_eq(current_uid(), KUIDT_INIT(1000)))
-		return;
+		return 0;
 	if (p->policy == SCHED_FIFO && p->rt_priority == 1 && READ_ONCE(op8_ui_fifo_boost)) {
-		if (p->boost == TASK_BOOST_NONE) {
+		if (p->boost == TASK_BOOST_NONE || p->boost_period) {
 			p->boost_period = 0;
 			p->boost_expires = 0;
 			p->boost = TASK_BOOST_ON_MID;
+			return 1;
 		}
 	} else if (fair_policy(p->policy) && p->boost == TASK_BOOST_ON_MID && !p->boost_period) {
 		p->boost = TASK_BOOST_NONE;
+		return -1;
 	}
+	return 0;
 }
 #else
-static inline void op8_ui_fifo_mark(struct task_struct *p) { }
+static inline int op8_ui_fifo_mark(struct task_struct *p) { return 0; }
 #endif
 
 static int __sched_setscheduler(struct task_struct *p,
@@ -5074,6 +5078,7 @@ static int __sched_setscheduler(struct task_struct *p,
 	int reset_on_fork;
 	int queue_flags = DEQUEUE_SAVE | DEQUEUE_MOVE | DEQUEUE_NOCLOCK;
 	struct rq *rq;
+	int op8_mark;
 
 	/* The pi code expects interrupts enabled */
 	BUG_ON(pi && in_interrupt());
@@ -5285,7 +5290,7 @@ change:
 
 	__setscheduler(rq, p, attr, pi);
 	__setscheduler_uclamp(p, attr);
-	op8_ui_fifo_mark(p);
+	op8_mark = op8_ui_fifo_mark(p);
 
 	if (queued) {
 		/*
@@ -5312,6 +5317,9 @@ change:
 	/* Run balance callbacks after we've adjusted the PI chain: */
 	balance_callback(rq);
 	preempt_enable();
+
+	if (op8_mark)
+		op8_metis_ui_fifo(op8_mark);
 
 	return 0;
 }

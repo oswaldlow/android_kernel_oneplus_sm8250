@@ -64,11 +64,11 @@
 #define METIS_SF_RELEASE	_IO('U', 17)
 
 enum { ST_TOKEN, ST_RELEASE, ST_FRAME, ST_DYNAMIC, ST_DYNAMIC_DEL, ST_LINK, ST_LINK_DEL, ST_TASKBOOST, ST_CLUSTER,
-       ST_VIPTASK, ST_PRIO, ST_PRIO_MULTI, ST_PRIO_DEL, ST_PERSIST, ST_WAKEUP, ST_DISPLAY_ON, ST_REASSERT, ST_DENIED,
-       ST_OTHER, ST_NR };
+       ST_VIPTASK, ST_PRIO, ST_PRIO_MULTI, ST_PRIO_DEL, ST_PERSIST, ST_WAKEUP, ST_DISPLAY_ON, ST_REASSERT, ST_UI_FIFO,
+       ST_DENIED, ST_OTHER, ST_NR };
 static const char * const st_name[ST_NR] = { "token", "release", "frame", "dynamic", "dynamic_del", "link",
 	"link_del", "taskboost", "cluster", "viptask", "prio", "prio_multi", "prio_del", "persist", "wakeup",
-	"display_on", "boost_reassert", "denied", "other" };
+	"display_on", "boost_reassert", "ui_fifo", "denied", "other" };
 static atomic_t stats[ST_NR];
 static int mi_boost_duration;	/* ms, written by SF / TurboSched before FRAME_BOOST */
 
@@ -294,32 +294,77 @@ static bool display_boosted;
 static unsigned long display_boost_until;	/* jiffies */
 
 /*
- * The QTI perf HAL writes /proc/sys/kernel/sched_boost for its own hints and writes 0 when they end, and 0 means
- * "disable all boosts" (sched_boost_disable_all()), ours included. Re-check every 100 ms during the window and
- * re-enable when it was wiped (kernel #30 measured the boost surviving only the first of several wakes).
+ * S64: the same boost while HyperOS's SchedBoostService animates, i.e. while any thread carries the S63 FIFO mark
+ * (kernel/sched/core.c reports marks / unmarks through op8_metis_ui_fifo()), at most UI_FIFO_MS after the last mark
+ * in case a marked thread exits without being switched back. Plus a GPU floor (kgsl pwrlevel gpu_boost_level, 0 =
+ * 587 MHz, -1 = off) for both: msm-adreno-tz ramps slowly and SurfaceFlinger's blur composition and SystemUI's
+ * frames missed with the GPU at 400-490 MHz. Shade "switch back to notifications", hitches per gesture: 11 without,
+ * 6.7 with the GPU floor alone, 2.0 with the GPU floor and FULL_THROTTLE.
+ */
+#define UI_FIFO_MS	3000
+static atomic_t ui_fifo_count = ATOMIC_INIT(0);
+static unsigned long ui_fifo_until;	/* jiffies */
+static int gpu_boost_level;
+static int gpu_floor = -1;		/* level currently applied */
+
+/*
+ * Re-checked every 100 ms while active. A write of 0 to /proc/sys/kernel/sched_boost (sched_boost_disable_all())
+ * drops our reference too; then it is taken again (counted in boost_reassert).
  */
 static void display_boost_tick_fn(struct work_struct *w);
 static DECLARE_DELAYED_WORK(display_boost_tick, display_boost_tick_fn);
 
 static void display_boost_tick_fn(struct work_struct *w)
 {
+	bool ui, active;
+	int level;
+
 	mutex_lock(&display_boost_lock);
-	if (time_after_eq(jiffies, display_boost_until)) {
+	ui = atomic_read(&ui_fifo_count) > 0;
+	if (ui && time_after_eq(jiffies, ui_fifo_until)) {
+		atomic_set(&ui_fifo_count, 0);	/* a marked thread went away without being unmarked */
+		ui = false;
+	}
+	active = ui || time_before(jiffies, display_boost_until);
+	if (!active) {
 		if (display_boosted)
 			sched_set_boost(-1);	/* FULL_THROTTLE_BOOST_DISABLE (no-op if already wiped) */
 		display_boosted = false;
-		mutex_unlock(&display_boost_lock);
-		return;
-	}
-	if (!display_boosted || !sysctl_sched_boost) {
+	} else if (!display_boosted || !sysctl_sched_boost) {
 		if (!sched_set_boost(1)) {	/* FULL_THROTTLE_BOOST */
 			if (display_boosted)
 				atomic_inc(&stats[ST_REASSERT]);
 			display_boosted = true;
 		}
 	}
+	level = active ? READ_ONCE(gpu_boost_level) : -1;
+	if (level != gpu_floor) {
+		op8_kgsl_gpu_floor(level);
+		gpu_floor = level;
+	}
 	mutex_unlock(&display_boost_lock);
-	queue_delayed_work(system_highpri_wq, &display_boost_tick, msecs_to_jiffies(100));
+	if (active)
+		queue_delayed_work(system_highpri_wq, &display_boost_tick, msecs_to_jiffies(100));
+}
+
+static void ui_fifo_kick_fn(struct work_struct *w)
+{
+	mod_delayed_work(system_highpri_wq, &display_boost_tick, 0);
+}
+static DECLARE_WORK(ui_fifo_kick, ui_fifo_kick_fn);
+
+/* +1: a thread got the S63 FIFO mark, -1: one lost it. Called by __sched_setscheduler() without rq locks held. */
+void op8_metis_ui_fifo(int delta)
+{
+	if (delta > 0) {
+		atomic_inc(&stats[ST_UI_FIFO]);
+		WRITE_ONCE(ui_fifo_until, jiffies + msecs_to_jiffies(UI_FIFO_MS));
+		if (atomic_inc_return(&ui_fifo_count) != 1)
+			return;
+	} else if (atomic_dec_if_positive(&ui_fifo_count) != 0) {
+		return;
+	}
+	queue_work(system_highpri_wq, &ui_fifo_kick);
 }
 
 static void display_boost_on_fn(struct work_struct *w)
@@ -538,6 +583,7 @@ module_param(metis_wakeup_enable, int, 0664);
 module_param(mi_boost_duration, int, 0664);
 module_param(display_on_boost_ms, int, 0664);
 module_param_named(ui_fifo_boost, op8_ui_fifo_boost, int, 0664);
+module_param(gpu_boost_level, int, 0664);
 static int sserver_tgid;
 module_param(sserver_tgid, int, 0664);
 static char *version = "op8-1";
