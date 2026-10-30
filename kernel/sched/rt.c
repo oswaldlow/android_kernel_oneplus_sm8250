@@ -1478,6 +1478,36 @@ static void yield_task_rt(struct rq *rq)
 }
 
 #ifdef CONFIG_SMP
+/*
+ * OnePlus 8 port: FIFO UI threads (the S63 mark, see op8_ui_fifo_mark() in
+ * core.c) are kept on the big CPUs: higher priority RT tasks preempting them
+ * there run briefly, while a frame finished on an A55 core takes 2.5x as
+ * long and RT tasks have no misfit up-migration.
+ */
+static inline bool op8_ui_boosted(struct task_struct *p)
+{
+	return p->boost > TASK_BOOST_NONE &&
+	       (!p->boost_period || sched_clock() < p->boost_expires);
+}
+
+/* the big CPU running the lowest priority, to queue a FIFO UI thread on */
+static int op8_lowest_prio_big_cpu(struct task_struct *p, int fallback)
+{
+	int cpu, best = fallback, best_prio = -1;
+
+	for_each_cpu_and(cpu, &p->cpus_allowed, cpu_active_mask) {
+		int prio = READ_ONCE(cpu_rq(cpu)->rt.highest_prio.curr);
+
+		if (is_min_capacity_cpu(cpu) || cpu_isolated(cpu))
+			continue;
+		if (prio > best_prio) {
+			best_prio = prio;
+			best = cpu;
+		}
+	}
+	return best;
+}
+
 static int find_lowest_rq(struct task_struct *task);
 
 /*
@@ -1564,6 +1594,13 @@ select_task_rq_rt(struct task_struct *p, int cpu, int sd_flag, int flags,
 		   (may_not_preempt ||
 		    p->prio < cpu_rq(target)->rt.highest_prio.curr))
 			cpu = target;
+		/*
+		 * OnePlus 8 port: no lower priority big CPU for a FIFO UI
+		 * thread last run on a little one: queue it on a big CPU.
+		 */
+		if (target == -1 && is_min_capacity_cpu(cpu) &&
+		    op8_ui_boosted(p))
+			cpu = op8_lowest_prio_big_cpu(p, cpu);
 	}
 	rcu_read_unlock();
 
@@ -1763,6 +1800,8 @@ static struct task_struct *pick_highest_pushable_task(struct rq *rq, int cpu)
 		return NULL;
 
 	plist_for_each_entry(p, head, pushable_tasks) {
+		if (is_min_capacity_cpu(cpu) && op8_ui_boosted(p))
+			continue;
 		if (pick_rt_task(rq, p, cpu))
 			return p;
 	}
@@ -1938,6 +1977,10 @@ static int find_lowest_rq(struct task_struct *task)
 
 	if (static_branch_unlikely(&sched_energy_present))
 		cpu = rt_energy_aware_wake_cpu(task);
+
+	/* OnePlus 8 port: a FIFO UI thread waits for a big CPU instead */
+	if (op8_ui_boosted(task) && (cpu == -1 || is_min_capacity_cpu(cpu)))
+		return -1;
 
 	if (cpu == -1)
 		cpu = task_cpu(task);
