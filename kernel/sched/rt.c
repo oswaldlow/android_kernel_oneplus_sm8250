@@ -1785,9 +1785,20 @@ static int rt_energy_aware_wake_cpu(struct task_struct *task)
 	unsigned long tutil = task_util(task);
 	int best_cpu_idle_idx = INT_MAX;
 	int cpu_idle_idx = -1;
-	bool boost_on_big = rt_boost_on_big();
+	/* OnePlus 8 port: also per-task boost (FIFO UI threads, see op8_ui_fifo_mark() in core.c) */
+	bool boost_on_big = rt_boost_on_big() ||
+		(task->boost > TASK_BOOST_NONE &&
+		 (!task->boost_period || sched_clock() < task->boost_expires));
 
 	rcu_read_lock();
+
+	cpu = task_cpu(task);
+	if (boost_on_big && !rt_boost_on_big() && !is_min_capacity_cpu(cpu) &&
+	    cpumask_test_cpu(cpu, lowest_mask) && !cpu_isolated(cpu) &&
+	    !sched_cpu_high_irqload(cpu) && !__cpu_overutilized(cpu, tutil)) {
+		best_cpu = cpu;
+		goto unlock;
+	}
 
 	cpu = cpu_rq(smp_processor_id())->rd->min_cap_orig_cpu;
 	if (cpu < 0)

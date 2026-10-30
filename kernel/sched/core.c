@@ -24,6 +24,7 @@
 
 #include "pelt.h"
 #include "walt.h"
+#include <linux/op8_metis.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
@@ -5032,6 +5033,34 @@ static bool check_same_owner(struct task_struct *p)
 	return match;
 }
 
+#ifdef CONFIG_SCHED_WALT
+/*
+ * OnePlus 8 port: for an animation HyperOS's SchedBoostService (system_server) switches the UI thread and RenderThread
+ * of the app on screen (SystemUI shade, launcher unlock / app transitions) to SCHED_FIFO 1 and back to SCHED_NORMAL
+ * afterwards. RT placement (rt_energy_aware_wake_cpu) honours nothing but the global sched_boost and keeps them on the
+ * little cores, where the shade misses every other frame. Mark them with a WALT per-task boost while they are FIFO;
+ * threads that make themselves RT (audio, bluetooth, input, SurfaceFlinger) are left alone.
+ */
+int op8_ui_fifo_boost = 1;	/* /sys/module/metis/parameters/ui_fifo_boost */
+
+static void op8_ui_fifo_mark(struct task_struct *p)
+{
+	if (!p->mm || current->tgid == p->tgid || !uid_eq(current_uid(), KUIDT_INIT(1000)))
+		return;
+	if (p->policy == SCHED_FIFO && p->rt_priority == 1 && READ_ONCE(op8_ui_fifo_boost)) {
+		if (p->boost == TASK_BOOST_NONE) {
+			p->boost_period = 0;
+			p->boost_expires = 0;
+			p->boost = TASK_BOOST_ON_MID;
+		}
+	} else if (fair_policy(p->policy) && p->boost == TASK_BOOST_ON_MID && !p->boost_period) {
+		p->boost = TASK_BOOST_NONE;
+	}
+}
+#else
+static inline void op8_ui_fifo_mark(struct task_struct *p) { }
+#endif
+
 static int __sched_setscheduler(struct task_struct *p,
 				const struct sched_attr *attr,
 				bool user, bool pi)
@@ -5256,6 +5285,7 @@ change:
 
 	__setscheduler(rq, p, attr, pi);
 	__setscheduler_uclamp(p, attr);
+	op8_ui_fifo_mark(p);
 
 	if (queued) {
 		/*
