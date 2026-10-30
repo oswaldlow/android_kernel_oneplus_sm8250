@@ -1662,6 +1662,46 @@ static struct notifier_block thermal_pm_nb = {
 	.notifier_call = thermal_pm_notify,
 };
 
+/*
+ * OnePlus 8 port: Xiaomi's thermal_message device. HyperOS's Security center reads the board ("surface")
+ * temperature from /sys/class/thermal/thermal_message/board_sensor_temp; on Xiaomi kernels the Xiaomi thermal
+ * daemon writes it there. Keep a written value; until then report the skin thermistor, millidegrees C.
+ */
+static int op8_board_temp = INT_MIN;
+
+static ssize_t board_sensor_temp_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct thermal_zone_device *tz;
+	int temp = READ_ONCE(op8_board_temp);
+
+	if (temp == INT_MIN) {
+		tz = thermal_zone_get_zone_by_name("skin-therm-usr");
+		if (IS_ERR(tz) || thermal_zone_get_temp(tz, &temp))
+			return -ENODATA;
+	}
+	return scnprintf(buf, PAGE_SIZE, "%d\n", temp);
+}
+
+static ssize_t board_sensor_temp_store(struct device *dev, struct device_attribute *attr, const char *buf,
+				       size_t count)
+{
+	int temp;
+
+	if (kstrtoint(buf, 10, &temp))
+		return -EINVAL;
+	WRITE_ONCE(op8_board_temp, temp);
+	return count;
+}
+static DEVICE_ATTR_RW(board_sensor_temp);
+
+static void op8_thermal_message_init(void)
+{
+	struct device *dev = device_create(&thermal_class, NULL, MKDEV(0, 0), NULL, "thermal_message");
+
+	if (IS_ERR(dev) || device_create_file(dev, &dev_attr_board_sensor_temp))
+		pr_warn("thermal: thermal_message not created\n");
+}
+
 static int __init thermal_init(void)
 {
 	int result;
@@ -1692,6 +1732,8 @@ static int __init thermal_init(void)
 	if (result)
 		pr_warn("Thermal: Can not register suspend notifier, return %d\n",
 			result);
+
+	op8_thermal_message_init();
 
 	return 0;
 
