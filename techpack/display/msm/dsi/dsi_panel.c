@@ -38,6 +38,7 @@
 #include "sde_trace.h"
 #endif /* OPLUS_FEATURE_ADFR */
 #include "sde_dbg.h"
+#include <linux/op8_metis.h>
 
 /**
  * topology is currently defined by a set of following 3 values:
@@ -5562,6 +5563,8 @@ int dsi_panel_set_nolp(struct dsi_panel *panel)
 #ifdef OPLUS_BUG_STABILITY
 	pr_err("debug for dsi_panel_set_nolp\n");
 #endif
+	/* OnePlus 8 port: lock screen animation runs right after this (drivers/misc/metis.c) */
+	op8_metis_display_on();
 
 	mutex_lock(&panel->panel_lock);
 	if (!panel->panel_initialized)
@@ -6057,6 +6060,8 @@ int dsi_panel_enable(struct dsi_panel *panel)
 #ifdef OPLUS_BUG_STABILITY
 	pr_err("%s\n", __func__);
 #endif
+	/* OnePlus 8 port: lock screen animation runs right after this (drivers/misc/metis.c) */
+	op8_metis_display_on();
 
 #ifdef OPLUS_BUG_STABILITY
 	if (panel->nt36523w_ktz8866) {
