@@ -1795,7 +1795,7 @@ static int rt_energy_aware_wake_cpu(struct task_struct *task)
 	cpu = task_cpu(task);
 	if (boost_on_big && !rt_boost_on_big() && !is_min_capacity_cpu(cpu) &&
 	    cpumask_test_cpu(cpu, lowest_mask) && !cpu_isolated(cpu) &&
-	    !sched_cpu_high_irqload(cpu) && !__cpu_overutilized(cpu, tutil)) {
+	    !sched_cpu_high_irqload(cpu)) {
 		best_cpu = cpu;
 		goto unlock;
 	}
@@ -1832,7 +1832,13 @@ retry:
 			if (sched_cpu_high_irqload(cpu))
 				continue;
 
-			if (__cpu_overutilized(cpu, tutil))
+			/*
+			 * OnePlus 8 port: CFS load does not delay an RT task
+			 * (lowest_mask only holds CPUs running lower priority
+			 * tasks), so a task boosted on big takes any big CPU
+			 * there instead of falling back to a little one.
+			 */
+			if (!boost_on_big && __cpu_overutilized(cpu, tutil))
 				continue;
 
 			util = cpu_util(cpu);
