@@ -602,9 +602,21 @@ enum {
  *                        when outstanding transactions are cleaned up
  *                        (protected by @proc->inner_lock)
  * @task:                 struct task_struct for this thread
+ * @prio_lock:            protects thread priority fields
+ * @prio_next:            saved priority to be restored next
+ *                        (protected by @prio_lock)
+ * @prio_state:           state of the priority restore process as
+ *                        defined by enum binder_prio_state
+ *                        (protected by @prio_lock)
  *
  * Bookkeeping structure for binder threads.
  */
+enum binder_prio_state {
+	BINDER_PRIO_SET,	/* desired priority set */
+	BINDER_PRIO_PENDING,	/* initiated a saved priority restore */
+	BINDER_PRIO_ABORT,	/* abort the pending priority restore */
+};
+
 struct binder_thread {
 	struct binder_proc *proc;
 	struct rb_node rb_node;
@@ -622,6 +634,9 @@ struct binder_thread {
 	atomic_t tmp_ref;
 	bool is_dead;
 	struct task_struct *task;
+	spinlock_t prio_lock;
+	struct binder_priority prio_next;
+	enum binder_prio_state prio_state;
 };
 
 struct binder_transaction {
@@ -1249,19 +1264,51 @@ static void binder_restore_priority(struct task_struct *task,
 	binder_do_set_priority(task, desired, /* verify = */ false);
 }
 
-static void binder_transaction_priority(struct task_struct *task,
+/*
+ * Restore the priority saved in the transaction a thread just replied to,
+ * unless a new transaction queued to the thread in the meantime aborted it
+ * (see binder_transaction_priority()).
+ */
+static void binder_restore_priority_pending(struct binder_thread *thread,
+					    struct binder_priority desired)
+{
+	spin_lock(&thread->prio_lock);
+	if (thread->prio_state == BINDER_PRIO_PENDING)
+		binder_do_set_priority(thread->task, desired,
+				       /* verify = */ false);
+	thread->prio_state = BINDER_PRIO_SET;
+	spin_unlock(&thread->prio_lock);
+}
+
+static void binder_transaction_priority(struct binder_thread *thread,
 					struct binder_transaction *t,
 					struct binder_priority node_prio,
 					bool inherit_rt)
 {
+	struct task_struct *task = thread->task;
 	struct binder_priority desired_prio = t->priority;
 
 	if (t->set_priority_called)
 		return;
 
 	t->set_priority_called = true;
-	t->saved_priority.sched_policy = task->policy;
-	t->saved_priority.prio = task->normal_prio;
+
+	spin_lock(&thread->prio_lock);
+	if (thread->prio_state == BINDER_PRIO_PENDING) {
+		/*
+		 * The thread is about to restore the priority saved in the
+		 * transaction it just replied to; its current priority is
+		 * the transient one it inherited for that transaction.
+		 * Save the pending priority instead and abort the restore,
+		 * which would otherwise override the priority set below.
+		 */
+		t->saved_priority = thread->prio_next;
+		thread->prio_state = BINDER_PRIO_ABORT;
+	} else {
+		t->saved_priority.sched_policy = task->policy;
+		t->saved_priority.prio = task->normal_prio;
+	}
+	spin_unlock(&thread->prio_lock);
 
 	if (!inherit_rt && is_rt_policy(desired_prio.sched_policy)) {
 		desired_prio.prio = NICE_TO_PRIO(0);
@@ -3022,7 +3069,7 @@ static int binder_proc_transaction(struct binder_transaction *t,
 		thread = binder_select_thread_ilocked(proc);
 
 	if (thread) {
-		binder_transaction_priority(thread->task, t, node_prio,
+		binder_transaction_priority(thread, t, node_prio,
 					    node->inherit_rt);
 		binder_enqueue_thread_work_ilocked(thread, &t->work);
 	} else if (!pending_async) {
@@ -3667,12 +3714,22 @@ static void binder_transaction(struct binder_proc *proc,
 		}
 		BUG_ON(t->buffer->async_transaction != 0);
 		binder_pop_transaction_ilocked(target_thread, in_reply_to);
+		/*
+		 * The target may send us a new transaction as soon as it
+		 * is woken up, before our priority is restored below:
+		 * mark the restore pending first.
+		 */
+		spin_lock(&thread->prio_lock);
+		thread->prio_state = BINDER_PRIO_PENDING;
+		thread->prio_next = in_reply_to->saved_priority;
+		spin_unlock(&thread->prio_lock);
 		binder_enqueue_thread_work_ilocked(target_thread, &t->work);
 		target_proc->outstanding_txns++;
 		binder_inner_proc_unlock(target_proc);
 
 		wake_up_interruptible_sync(&target_thread->wait);
-		binder_restore_priority(current, in_reply_to->saved_priority);
+		binder_restore_priority_pending(thread,
+						in_reply_to->saved_priority);
 		binder_free_transaction(in_reply_to);
 	} else if (!(t->flags & TF_ONE_WAY)) {
 		BUG_ON(t->buffer->async_transaction != 0);
@@ -4599,7 +4656,7 @@ retry:
 			trd->cookie =  target_node->cookie;
 			node_prio.sched_policy = target_node->sched_policy;
 			node_prio.prio = target_node->min_priority;
-			binder_transaction_priority(current, t, node_prio,
+			binder_transaction_priority(thread, t, node_prio,
 						    target_node->inherit_rt);
 			cmd = BR_TRANSACTION;
 		} else {
@@ -4796,6 +4853,8 @@ static struct binder_thread *binder_get_thread_ilocked(
 	thread->pid = current->pid;
 	get_task_struct(current);
 	thread->task = current;
+	spin_lock_init(&thread->prio_lock);
+	thread->prio_state = BINDER_PRIO_SET;
 	atomic_set(&thread->tmp_ref, 0);
 	init_waitqueue_head(&thread->wait);
 	INIT_LIST_HEAD(&thread->todo);
