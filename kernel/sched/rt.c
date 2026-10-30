@@ -1772,6 +1772,29 @@ static struct task_struct *pick_highest_pushable_task(struct rq *rq, int cpu)
 
 static DEFINE_PER_CPU(cpumask_var_t, local_cpu_mask);
 
+/*
+ * OnePlus 8 port: cpupri_find() only returns the lowest priority level that
+ * has a CPU, i.e. just the idle CPUs when there are any, typically little
+ * ones. A task boosted on big may as well preempt a big CPU running lower
+ * priority (CFS) tasks: add those to lowest_mask.
+ */
+static void op8_add_preemptible_big_cpus(struct task_struct *task,
+					 struct cpumask *lowest_mask)
+{
+	int cpu;
+
+	for_each_cpu_and(cpu, &task->cpus_allowed, cpu_active_mask) {
+		if (is_min_capacity_cpu(cpu) || cpu_isolated(cpu))
+			continue;
+		/* unlocked access, like select_task_rq_rt() */
+		if (READ_ONCE(cpu_rq(cpu)->rt.highest_prio.curr) <= task->prio)
+			continue;
+		if (task_may_not_preempt(READ_ONCE(cpu_rq(cpu)->curr), cpu))
+			continue;
+		cpumask_set_cpu(cpu, lowest_mask);
+	}
+}
+
 static int rt_energy_aware_wake_cpu(struct task_struct *task)
 {
 	struct sched_domain *sd;
@@ -1789,6 +1812,9 @@ static int rt_energy_aware_wake_cpu(struct task_struct *task)
 	bool boost_on_big = rt_boost_on_big() ||
 		(task->boost > TASK_BOOST_NONE &&
 		 (!task->boost_period || sched_clock() < task->boost_expires));
+
+	if (boost_on_big)
+		op8_add_preemptible_big_cpus(task, lowest_mask);
 
 	rcu_read_lock();
 
