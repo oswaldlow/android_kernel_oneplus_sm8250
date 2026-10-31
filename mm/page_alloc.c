@@ -63,6 +63,7 @@
 #include <linux/page_owner.h>
 #include <linux/kthread.h>
 #include <linux/memcontrol.h>
+#include <linux/op8_mem_engine.h>
 #include <linux/show_mem_notifier.h>
 #include <linux/ftrace.h>
 #include <linux/lockdep.h>
@@ -4359,7 +4360,8 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 		 * comment for __cpuset_node_allowed().
 		 */
 		alloc_flags &= ~ALLOC_CPUSET;
-	} else if (unlikely(rt_task(current)) && !in_interrupt())
+	} else if (unlikely(rt_task(current) || op8_mem_scene_task(current)) && !in_interrupt())
+		/* OnePlus 8 port: also the threads of a HyperOS app launch scene (op8_mem_engine.c) */
 		alloc_flags |= ALLOC_HARDER;
 
 	if (gfp_mask & __GFP_KSWAPD_RECLAIM)

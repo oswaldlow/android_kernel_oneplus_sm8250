@@ -86,4 +86,5 @@ obj-$(CONFIG_OPLUS_RF_CABLE_MONITOR) += op_ant_detect.o
 obj-$(CONFIG_SIM_DETECT)	+= sim_detect.o
 obj-y				+= tri_state_key/
 obj-y				+= op8_iorap.o
+obj-y				+= op8_mem_engine.o
 obj-y				+= metis.o
