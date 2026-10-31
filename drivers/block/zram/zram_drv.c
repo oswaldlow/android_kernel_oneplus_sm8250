@@ -41,7 +41,8 @@ static DEFINE_IDR(zram_index_idr);
 static DEFINE_MUTEX(zram_index_mutex);
 
 static int zram_major;
-static const char *default_compressor = "lzo";
+/* OnePlus 8 port: perfinit sets up zram before post_boot and never picks an algorithm */
+static const char *default_compressor = "lz4";
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
@@ -120,6 +121,18 @@ static inline void zram_set_element(struct zram *zram, u32 index,
 static unsigned long zram_get_element(struct zram *zram, u32 index)
 {
 	return zram->table[index].element;
+}
+
+static unsigned int zram_idle_age(struct zram *zram, u32 index)
+{
+	return (zram->table[index].flags & ZRAM_IDLE_AGE_MASK) >>
+		ZRAM_IDLE_AGE_SHIFT;
+}
+
+static void zram_set_idle_age(struct zram *zram, u32 index, unsigned int age)
+{
+	zram->table[index].flags &= ~ZRAM_IDLE_AGE_MASK;
+	zram->table[index].flags |= (unsigned long)age << ZRAM_IDLE_AGE_SHIFT;
 }
 
 static size_t zram_get_obj_size(struct zram *zram, u32 index)
@@ -285,6 +298,26 @@ static ssize_t mem_used_max_store(struct device *dev,
 	return len;
 }
 
+/* Slots per idle age, for idle_stat. Pages already on the backing device don't count. */
+static void zram_update_idle_stat(struct zram *zram)
+{
+	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long stat[ZRAM_IDLE_AGE_MAX] = { 0 };
+	unsigned int age;
+	int index;
+
+	for (index = 0; index < nr_pages; index++) {
+		zram_slot_lock(zram, index);
+		age = zram_idle_age(zram, index);
+		if (age && zram_allocated(zram, index) &&
+				!zram_test_flag(zram, index, ZRAM_WB) &&
+				!zram_test_flag(zram, index, ZRAM_SAME))
+			stat[age - 1]++;
+		zram_slot_unlock(zram, index);
+	}
+	memcpy(zram->stats.idle_stat, stat, sizeof(stat));
+}
+
 static ssize_t idle_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
@@ -318,10 +351,16 @@ static ssize_t idle_store(struct device *dev,
 		 */
 		zram_slot_lock(zram, index);
 		if (zram_allocated(zram, index) &&
-				!zram_test_flag(zram, index, ZRAM_UNDER_WB))
+				!zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
+			unsigned int age = zram_idle_age(zram, index);
+
 			zram_set_flag(zram, index, ZRAM_IDLE);
+			if (age < ZRAM_IDLE_AGE_MAX)
+				zram_set_idle_age(zram, index, age + 1);
+		}
 		zram_slot_unlock(zram, index);
 	}
+	zram_update_idle_stat(zram);
 
 	up_read(&zram->init_lock);
 
@@ -644,9 +683,11 @@ static ssize_t writeback_store(struct device *dev,
 	struct bio_vec bio_vec;
 	struct page *page;
 	ssize_t ret, sz;
-	char mode_buf[8];
+	char mode_buf[32];
 	int mode = -1;
 	unsigned long blk_idx = 0;
+	unsigned long wb_max = ULONG_MAX;
+	unsigned int wb_level = 0;
 
 	sz = strscpy(mode_buf, buf, sizeof(mode_buf));
 	if (sz <= 0)
@@ -660,6 +701,10 @@ static ssize_t writeback_store(struct device *dev,
 		mode = IDLE_WRITEBACK;
 	else if (!strcmp(mode_buf, "huge"))
 		mode = HUGE_WRITEBACK;
+	else if (sscanf(mode_buf, "idle %lu %u", &wb_max, &wb_level) == 2 &&
+		 wb_level >= 1 && wb_level <= ZRAM_IDLE_AGE_MAX)
+		/* HyperOS vold: at most <count> pages at least <level> markings old */
+		mode = IDLE_WRITEBACK;
 
 	if (mode == -1)
 		return -EINVAL;
@@ -681,8 +726,12 @@ static ssize_t writeback_store(struct device *dev,
 		goto release_init_lock;
 	}
 
-	for (index = 0; index < nr_pages; index++) {
+	for (index = 0; index < nr_pages && wb_max; index++) {
 		struct bio_vec bvec;
+
+		/* vold's stopExtMFlush interrupts us with SIGUSR1 */
+		if (signal_pending(current))
+			break;
 
 		bvec.bv_page = page;
 		bvec.bv_len = PAGE_SIZE;
@@ -715,6 +764,9 @@ static ssize_t writeback_store(struct device *dev,
 
 		if (mode == IDLE_WRITEBACK &&
 			  !zram_test_flag(zram, index, ZRAM_IDLE))
+			goto next;
+		if (mode == IDLE_WRITEBACK &&
+			  zram_idle_age(zram, index) < wb_level)
 			goto next;
 		if (mode == HUGE_WRITEBACK &&
 			  !zram_test_flag(zram, index, ZRAM_HUGE))
@@ -779,6 +831,7 @@ static ssize_t writeback_store(struct device *dev,
 		zram_set_element(zram, index, blk_idx);
 		blk_idx = 0;
 		atomic64_inc(&zram->stats.pages_stored);
+		wb_max--;
 		spin_lock(&zram->wb_limit_lock);
 		if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
 			zram->bd_wb_limit -=  1UL << (PAGE_SHIFT - 12);
@@ -789,6 +842,7 @@ next:
 
 	if (blk_idx)
 		free_block_bdev(zram, blk_idx);
+	zram_update_idle_stat(zram);
 	ret = len;
 	__free_page(page);
 release_init_lock:
@@ -884,6 +938,7 @@ static void zram_debugfs_destroy(void)
 static void zram_accessed(struct zram *zram, u32 index)
 {
 	zram_clear_flag(zram, index, ZRAM_IDLE);
+	zram_set_idle_age(zram, index, 0);
 	zram->table[index].ac_time = ktime_get_boottime();
 }
 
@@ -970,6 +1025,7 @@ static void zram_debugfs_destroy(void) {};
 static void zram_accessed(struct zram *zram, u32 index)
 {
 	zram_clear_flag(zram, index, ZRAM_IDLE);
+	zram_set_idle_age(zram, index, 0);
 };
 static void zram_debugfs_register(struct zram *zram) {};
 static void zram_debugfs_unregister(struct zram *zram) {};
@@ -1162,6 +1218,23 @@ static ssize_t bd_stat_show(struct device *dev,
 
 	return ret;
 }
+
+static ssize_t idle_stat_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	ssize_t ret = 0;
+	int i;
+
+	down_read(&zram->init_lock);
+	for (i = 0; i < ZRAM_IDLE_AGE_MAX; i++)
+		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%lu%c",
+				 zram->stats.idle_stat[i],
+				 i == ZRAM_IDLE_AGE_MAX - 1 ? '\n' : ' ');
+	up_read(&zram->init_lock);
+
+	return ret;
+}
 #endif
 
 static ssize_t debug_stat_show(struct device *dev,
@@ -1186,6 +1259,7 @@ static DEVICE_ATTR_RO(io_stat);
 static DEVICE_ATTR_RO(mm_stat);
 #ifdef CONFIG_ZRAM_WRITEBACK
 static DEVICE_ATTR_RO(bd_stat);
+static DEVICE_ATTR_RO(idle_stat);
 #endif
 static DEVICE_ATTR_RO(debug_stat);
 
@@ -1294,6 +1368,7 @@ static void zram_free_page(struct zram *zram, size_t index)
 #endif
 	if (zram_test_flag(zram, index, ZRAM_IDLE))
 		zram_clear_flag(zram, index, ZRAM_IDLE);
+	zram_set_idle_age(zram, index, 0);
 
 	if (zram_test_flag(zram, index, ZRAM_HUGE)) {
 		zram_clear_flag(zram, index, ZRAM_HUGE);
@@ -1995,6 +2070,7 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_mm_stat.attr,
 #ifdef CONFIG_ZRAM_WRITEBACK
 	&dev_attr_bd_stat.attr,
+	&dev_attr_idle_stat.attr,
 #endif
 	&dev_attr_debug_stat.attr,
 	NULL,

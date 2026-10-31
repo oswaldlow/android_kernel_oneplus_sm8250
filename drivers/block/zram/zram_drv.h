@@ -56,6 +56,15 @@ enum zram_pageflags {
 	__NR_ZRAM_PAGEFLAGS,
 };
 
+/*
+ * OnePlus 8 port: number of idle markings a slot has stayed unread, kept in
+ * table[page_no].flags above the page flags. HyperOS ExtM picks writeback
+ * candidates by this age.
+ */
+#define ZRAM_IDLE_AGE_SHIFT	32
+#define ZRAM_IDLE_AGE_MASK	(0xfUL << ZRAM_IDLE_AGE_SHIFT)
+#define ZRAM_IDLE_AGE_MAX	10
+
 /*-- Data structures */
 
 struct zram_entry {
@@ -101,7 +110,7 @@ struct zram_stats {
 					 * compressed size of pages
 					 * duplicated
 					 */
-	atomic64_t meta_data_size;	/* size of zram_entries */
+	atomic64_t meta_data_size;	/* size of zram_entries */	unsigned long idle_stat[ZRAM_IDLE_AGE_MAX];
 };
 
 struct zram_hash {
