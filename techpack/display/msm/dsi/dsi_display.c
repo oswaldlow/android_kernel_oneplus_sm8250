@@ -8366,6 +8366,36 @@ int dsi_display_pre_commit(void *display,
 	return rc;
 }
 
+/*
+ * op8port: dsi_display_disable() always tells touch the screen went off, but
+ * "on" is only sent by a set_power(ON). When the composer restarts the panel
+ * comes back on without one and touch stays in gesture mode.
+ */
+bool op8_tp_blanked;
+static struct dsi_display *op8_tp_display;
+
+static void op8_tp_resume_work_fn(struct work_struct *work)
+{
+	struct msm_drm_notifier notifier_data;
+	int blank = MSM_DRM_BLANK_UNBLANK;
+	struct dsi_panel *panel = op8_tp_display->panel;
+
+	/* power_mode stays OFF after dsi_panel_enable() until a set_power; LP1/LP2 = AOD */
+	if (!op8_tp_blanked || !panel->panel_initialized ||
+	    panel->power_mode == SDE_MODE_DPMS_LP1 ||
+	    panel->power_mode == SDE_MODE_DPMS_LP2)
+		return;
+
+	pr_info("op8port: panel on without set_power, resuming touch\n");
+	op8_tp_blanked = false;
+	memset(&notifier_data, 0, sizeof(notifier_data));
+	notifier_data.data = &blank;
+	notifier_data.id = 0;
+	msm_drm_notifier_call_chain(MSM_DRM_EARLY_EVENT_BLANK, &notifier_data);
+	msm_drm_notifier_call_chain(MSM_DRM_EVENT_BLANK, &notifier_data);
+}
+static DECLARE_DELAYED_WORK(op8_tp_resume_work, op8_tp_resume_work_fn);
+
 int dsi_display_enable(struct dsi_display *display)
 {
 	int rc = 0;
@@ -8445,6 +8475,8 @@ int dsi_display_enable(struct dsi_display *display)
 			       display->name, rc);
 			goto error;
 		}
+		op8_tp_display = display;
+		schedule_delayed_work(&op8_tp_resume_work, msecs_to_jiffies(500));
 #ifdef OPLUS_FEATURE_ADFR
 		/* restore qsync status after panel enable if ADFR enable*/
 		if (oplus_adfr_is_support()) {
@@ -8718,6 +8750,7 @@ int dsi_display_disable(struct dsi_display *display)
 		set_oplus_display_scene(OPLUS_DISPLAY_NORMAL_SCENE);
 		msm_drm_notifier_call_chain(MSM_DRM_EVENT_BLANK,
 					    &notifier_data);
+		op8_tp_blanked = true;
 #endif /* OPLUS_FEATURE_SAU */
 	}
 

@@ -54,6 +54,7 @@ int oplus_dimlayer_fingerprint_failcount = 0;
 extern struct dc_apollo_pcc_sync dc_apollo;
 extern int oplus_backlight_wait_vsync(struct drm_encoder *drm_enc);
 extern int msm_drm_notifier_call_chain(unsigned long val, void *v);
+extern bool op8_tp_blanked;
 int oplus_dc2_alpha;
 int oplus_dimlayer_bl_enable_v3 = 0;
 int oplus_dimlayer_bl_enable_v2 = 0;
@@ -2686,6 +2687,7 @@ int dsi_display_oplus_set_power(struct drm_connector *connector, int power_mode,
 			   "nt36523 lcd vid mode dsi panel"))
 			msm_drm_notifier_call_chain(MSM_DRM_EVENT_BLANK,
 						    &notifier_data);
+		op8_tp_blanked = false;
 		break;
 	case SDE_MODE_DPMS_OFF:
 	default:
